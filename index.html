@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Matrix Visualiser</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div>
+        <h1>Matrix Visualiser</h1>
+        <p>Paste Python / NumPy code and replay it line by line</p>
+      </div>
+    </div>
+    <div id="status" class="status loading" role="status">
+      <span class="dot"></span><span id="status-text">Loading Python…</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="pane code-pane" aria-label="Code">
+      <div class="pane-head">
+        <select id="examples" aria-label="Load an example">
+          <option value="">Load an example…</option>
+        </select>
+        <span class="spacer"></span>
+        <button id="edit-btn" type="button" hidden>Edit code</button>
+        <button id="run-btn" type="button" class="primary" disabled title="Ctrl/⌘ + Enter">Visualise</button>
+      </div>
+      <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off"
+        aria-label="Python code" placeholder="# paste the exercise code here"></textarea>
+      <div id="code-view" class="code-view" hidden></div>
+      <div class="stdin">
+        <label for="stdin">Values for <code>input()</code>, one per line</label>
+        <textarea id="stdin" rows="2" spellcheck="false" placeholder="e.g. 3"></textarea>
+      </div>
+    </section>
+
+    <section class="pane viz-pane" aria-label="Visualisation">
+      <div class="controls">
+        <div class="buttons">
+          <button id="first-btn" type="button" title="First step (Home)" disabled>⏮</button>
+          <button id="prev-btn" type="button" title="Previous step (←)" disabled>◀</button>
+          <button id="play-btn" type="button" class="play" title="Play / pause (Space)" disabled>▶</button>
+          <button id="next-btn" type="button" title="Next step (→)" disabled>▶︎|</button>
+          <button id="last-btn" type="button" title="Last step (End)" disabled>⏭</button>
+        </div>
+        <input id="step-slider" type="range" min="0" max="0" value="0" disabled aria-label="Step">
+        <span id="step-label" class="step-label">–</span>
+        <label class="speed">
+          <span>Speed</span>
+          <select id="speed">
+            <option value="1">1 / s</option>
+            <option value="2">2 / s</option>
+            <option value="4" selected>4 / s</option>
+            <option value="10">10 / s</option>
+            <option value="30">30 / s</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="explain" class="explain"><span class="muted">The current line, with values filled in, appears here.</span></div>
+
+      <div class="legend">
+        <span class="key"><i class="sw read"></i>read by this line</span>
+        <span class="key"><i class="sw write"></i>written / changed</span>
+        <span class="spacer"></span>
+        <label class="opt"><input id="shade" type="checkbox"> Shade by value</label>
+        <label class="opt">Decimals
+          <select id="decimals">
+            <option>0</option><option>1</option><option selected>2</option>
+            <option>3</option><option>4</option><option>6</option>
+          </select>
+        </label>
+        <label class="opt">Step limit
+          <input id="max-steps" type="number" min="100" max="50000" step="500" value="3000">
+        </label>
+      </div>
+
+      <div id="banner" class="banner" hidden></div>
+
+      <div id="frames" class="frames">
+        <div class="empty">
+          <p class="empty-title">Nothing to show yet</p>
+          <p>Paste code on the left (or load an example) and press <b>Visualise</b>.
+            Every matrix, vector and loop variable will appear here, and each step
+            shows which cells the current line reads and writes.</p>
+        </div>
+      </div>
+
+      <div class="console">
+        <div class="console-head">Output</div>
+        <pre id="stdout"></pre>
+      </div>
+    </section>
+  </main>
+
+  <script src="examples.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
