@@ -32,7 +32,7 @@
   let traceJson = null;
   const view = {
     trace: null, lines: [], lineEls: [], marked: [],
-    step: 0, timer: null, mode: 'edit',
+    step: 0, timer: null, mode: 'edit', earlier: null,
   };
 
   // ---------------------------------------------------------------- helpers
@@ -232,7 +232,7 @@
   function startPlay() {
     if (!view.trace) return;
     const last = view.trace.steps.length - 1;
-    if (view.step >= last) goTo(0);
+    goTo(view.step >= last ? 0 : view.step + 1); // move right away, even at slow speeds
     view.timer = setInterval(() => {
       if (view.step >= view.trace.steps.length - 1) stopPlay();
       else goTo(view.step + 1);
@@ -317,8 +317,12 @@
     if (failed) {
       body = `${esc(trace.error.type)}: ${esc(trace.error.msg)}`;
     } else {
+      // Values the tracer marked become tokens coloured like the cell they came from.
       const text = step.explain || (view.lines[step.line - 1] || '').trim();
-      body = esc(text).replace(/→/g, '<span class="arrow">→</span>');
+      body = esc(text)
+        .replace(/([rwn])([^]*)([^]*)/g, (_, kind, ref, inner) => (
+          `<span class="tok ${kind}"${ref ? ` data-ref="${ref}"` : ''}>${inner}</span>`))
+        .replace(/→/g, '<span class="arrow">→</span>');
     }
     els.explain.className = 'explain' + (failed ? ' err' : '');
     els.explain.innerHTML = `<span class="where">${esc(where)}</span>${body}`;
@@ -327,16 +331,36 @@
   function accessMap(step) {
     const map = new Map();
     const add = (list, kind) => {
-      for (const [uid, name, cells] of list) {
+      for (const [uid, name, cells, labels] of list) {
         const key = `${uid}:${name}`;
         const entry = map.get(key) || {};
         entry[kind] = cells === null ? 'all' : new Set(cells);
+        entry[kind + 'Labels'] = labels || [];
         map.set(key, entry);
       }
     };
     add(step.reads, 'r');
     add(step.writes, 'w');
     return map;
+  }
+
+  /** Cells written one at a time before step `index`, per "uid:name"; reassigning
+   *  the whole variable starts it over. Cached so stepping forward stays cheap. */
+  function writtenBefore(index) {
+    let cache = view.earlier;
+    if (!cache || cache.trace !== view.trace || cache.upTo > index) {
+      cache = view.earlier = { trace: view.trace, upTo: 0, map: new Map() };
+    }
+    const steps = view.trace.steps;
+    for (; cache.upTo < index; cache.upTo++) {
+      for (const [uid, name, cells] of steps[cache.upTo].writes) {
+        const key = `${uid}:${name}`;
+        if (cells === null) { cache.map.delete(key); continue; }
+        if (!cache.map.has(key)) cache.map.set(key, new Set());
+        for (const c of cells) cache.map.get(key).add(c);
+      }
+    }
+    return cache.map;
   }
 
   /** Cells whose value differs from the previous step: null, 'all' or a Set. */
@@ -360,8 +384,11 @@
     const prevFrames = new Map();
     if (prev) for (const f of prev.state) prevFrames.set(f.uid, new Map(f.vars));
     const access = accessMap(step);
+    const earlier = writtenBefore(view.step);
 
     els.frames.innerHTML = step.state.map((frame) => {
+      const isActive = frame.uid === step.frame;
+      if (!frame.vars.length && !isActive) return '';
       const prevVars = prevFrames.get(frame.uid);
       const chips = [];
       const mats = [];
@@ -369,14 +396,15 @@
         const blob = trace.blobs[index];
         const prevIndex = prevVars ? prevVars.get(name) : undefined;
         const prevBlob = prevIndex === undefined ? null : trace.blobs[prevIndex];
-        const acc = access.get(`${frame.uid}:${name}`) || {};
+        const key = `${frame.uid}:${name}`;
+        const acc = access.get(key) || {};
         const changed = prevIndex === index ? null : changedCells(blob, prevBlob);
         const written = union(acc.w || null, changed);
-        if (blob.t === 'arr') mats.push(renderMatrix(name, blob, prevBlob, acc.r || null, written));
+        if (blob.t === 'arr') mats.push(renderMatrix(frame.uid, name, blob, prevBlob, acc, written, earlier.get(key)));
         else if (blob.t === 'big') mats.push(renderBig(name, blob, acc.r, written));
-        else chips.push(renderChip(name, blob, acc.r, written));
+        else chips.push(renderChip(frame.uid, name, blob, acc.r, written));
       }
-      const active = frame.uid === step.frame ? ' active' : '';
+      const active = isActive ? ' active' : '';
       const body = chips.length || mats.length
         ? (chips.length ? `<div class="chips">${chips.join('')}</div>` : '') +
           (mats.length ? `<div class="mats">${mats.join('')}</div>` : '')
@@ -385,7 +413,7 @@
     }).join('');
   }
 
-  function renderChip(name, blob, read, written) {
+  function renderChip(uid, name, blob, read, written) {
     let value;
     let type = '';
     switch (blob.t) {
@@ -398,7 +426,8 @@
     const cls = written ? ' w' : read ? ' r' : '';
     const label = name === 'return' ? '↩ return' : name;
     const full = blob.t === 'num' ? String(blob.v) : value;
-    return `<span class="chip${cls}" title="${esc(`${name} = ${full}`)}"><span class="k">${esc(label)}</span>` +
+    return `<span class="chip${cls}" data-ref="${esc(`${uid}:${name}:`)}" title="${esc(`${name} = ${full}`)}">` +
+      `<span class="k">${esc(label)}</span>` +
       `<span class="eq">=</span><span class="v">${esc(value)}</span>${type ? `<span class="ty">${esc(type)}</span>` : ''}</span>`;
   }
 
@@ -409,14 +438,15 @@
       `<pre class="big">${esc(blob.text)}</pre></div>`;
   }
 
-  function renderMatrix(name, blob, prevBlob, read, written) {
+  function renderMatrix(uid, name, blob, prevBlob, acc, written, earlier) {
+    const read = acc.r || null;
     const two = blob.shape.length === 2;
     const rows = two ? blob.shape[0] : 1;
     const cols = two ? blob.shape[1] : blob.shape[0];
     const intLike = isIntLike(blob);
     const samePrev = prevBlob && prevBlob.t === 'arr' && prevBlob.shape.join() === blob.shape.join();
 
-    // Row / column labels light up when a cell in them is touched.
+    // Row / column numbers light up when a cell in them is touched.
     const rowHit = new Map();
     const colHit = new Map();
     for (const [set, kind] of [[read, 'r'], [written, 'w']]) {
@@ -428,6 +458,21 @@
         if (colHit.get(c) !== 'w') colHit.set(c, kind);
       }
     }
+
+    // Pointers: `a[i, k]` puts "i →" beside its row and "k ↓" above its column.
+    // A 1-D array is drawn as one row, so its only axis runs along the columns.
+    const rowPtr = new Map();
+    const colPtr = new Map();
+    for (const [labels, kind] of [[acc.rLabels, 'r'], [acc.wLabels, 'w']]) {
+      for (const [axis, text, positions] of labels || []) {
+        const target = two && axis === 0 ? rowPtr : colPtr;
+        const list = target.get(positions[0]) || [];
+        const same = list.find((p) => p.text === text);
+        if (same) { if (kind === 'w') same.kind = 'w'; } else list.push({ text, kind });
+        target.set(positions[0], list);
+      }
+    }
+    const pointer = (list) => list.map((p) => `<span class="${p.kind}">${esc(p.text)}</span>`).join('<span class="sep">,</span>');
 
     let lo = Infinity;
     let hi = -Infinity;
@@ -441,36 +486,50 @@
       let alpha;
       let tone = '--heat-pos';
       if (lo < 0 && hi > 0) {
-        const m = Math.max(-lo, hi);
-        alpha = Math.abs(v) / m;
+        alpha = Math.abs(v) / Math.max(-lo, hi);
         if (v < 0) tone = '--heat-neg';
       } else {
         alpha = hi === lo ? 0.5 : (v - lo) / (hi - lo);
         if (hi <= 0) { tone = '--heat-neg'; alpha = 1 - alpha; }
       }
-      return ` style="background: rgb(var(${tone}) / ${(0.06 + 0.5 * alpha).toFixed(3)})"`;
+      return `; background: rgb(var(${tone}) / ${(0.06 + 0.5 * alpha).toFixed(3)})`;
     };
 
-    let html = `<div class="grid${cols > 10 ? ' compact' : ''}" style="grid-template-columns: auto repeat(${cols}, max-content)">`;
-    html += '<div class="ix"></div>';
-    for (let c = 0; c < cols; c++) html += `<div class="ix ${colHit.get(c) || ''}">${c}</div>`;
+    // Every item is placed explicitly: row 1 / column 1 hold the pointers, row 2 /
+    // column 2 the indices, and the bracket overlays the cell block.
+    const at = (r, c) => `grid-area: ${r} / ${c}`;
+    const size = cols <= 6 ? 'l' : cols <= 10 ? 'm' : 's';
+    let html = `<div class="grid size-${size}${two ? '' : ' vec'}" style="grid-template-columns: ` +
+      `${two ? 'minmax(1.6em, auto) auto' : '0 0'} repeat(${cols}, max-content)">`;
+    for (let c = 0; c < cols; c++) {
+      const ptr = colPtr.get(c);
+      html += `<div class="ptr col" style="${at(1, c + 3)}">${ptr ? `${pointer(ptr)}<span class="arr">↓</span>` : ''}</div>`;
+      html += `<div class="ix col ${colHit.get(c) || ''}" style="${at(2, c + 3)}">${c}</div>`;
+    }
     for (let r = 0; r < rows; r++) {
-      html += `<div class="ix ${two ? rowHit.get(r) || '' : ''}">${two ? r : ''}</div>`;
+      if (two) {
+        const ptr = rowPtr.get(r);
+        if (ptr) html += `<div class="ptr row" style="${at(r + 3, 1)}">${pointer(ptr)}<span class="arr">→</span></div>`;
+        html += `<div class="ix row ${rowHit.get(r) || ''}" style="${at(r + 3, 2)}">${r}</div>`;
+      }
       for (let c = 0; c < cols; c++) {
         const i = r * cols + c;
         const v = blob.d[i];
-        const cls = (has(read, i) ? ' r' : '') + (has(written, i) ? ' w' : '');
+        const isWritten = has(written, i);
+        const cls = (has(read, i) ? ' r' : '') + (isWritten ? ' w' : '') +
+          (!isWritten && earlier && earlier.has(i) ? ' done' : '');
         let title = `${name}[${two ? `${r}, ` : ''}${c}] = ${v}`;
         if (samePrev && prevBlob.d[i] !== v) title += `  (was ${prevBlob.d[i]})`;
-        html += `<div class="cell${cls}" title="${esc(title)}"${shadeOf(v)}>${esc(fmtCell(v, intLike))}</div>`;
+        html += `<div class="cell${cls}" data-ref="${esc(`${uid}:${name}:${i}`)}" title="${esc(title)}" ` +
+          `style="${at(r + 3, c + 3)}${shadeOf(v)}">${esc(fmtCell(v, intLike))}</div>`;
       }
     }
-    html += '</div>';
+    html += `<div class="bracket" style="grid-area: 3 / 3 / ${rows + 3} / ${cols + 3}"></div></div>`;
 
     const nameCls = written ? ' w' : read ? ' r' : '';
-    const kind = blob.kind === 'ndarray' ? `ndarray · ${blob.dtype}` : blob.kind;
+    const kind = blob.kind === 'ndarray' ? blob.dtype : blob.kind;
     return `<div class="mat"><div class="mat-head"><span class="mat-name${nameCls}">${esc(name)}</span>` +
-      `<span class="mat-meta">${blob.shape.join('×')} ${esc(kind)}</span></div>` +
+      `<span class="mat-meta">${blob.shape.join(' × ')} · ${esc(kind)}</span></div>` +
       `<div class="mat-scroll">${html}</div></div>`;
   }
 
@@ -507,7 +566,8 @@
     els.editor.value = store.get('code', fallback.code);
     els.stdin.value = store.get('stdin', fallback.stdin);
     els.decimals.value = store.get('decimals', '2');
-    els.speed.value = store.get('speed', '4');
+    els.speed.value = store.get('speed', '1');
+    if (!els.speed.value) els.speed.value = '1'; // a stored speed that is no longer offered
     els.shade.checked = store.get('shade', '0') === '1';
 
     els.examples.addEventListener('change', () => {
@@ -545,6 +605,19 @@
       store.set('shade', els.shade.checked ? '1' : '0');
       if (view.trace && view.trace.steps.length) render();
     });
+    // Hovering a value in the explanation outlines the cell or variable it came from.
+    const focus = (ref) => {
+      for (const el of els.frames.querySelectorAll('.focus')) el.classList.remove('focus');
+      if (ref) {
+        for (const el of els.frames.querySelectorAll(`[data-ref="${CSS.escape(ref)}"]`)) el.classList.add('focus');
+      }
+    };
+    els.explain.addEventListener('mouseover', (e) => {
+      const tok = e.target.closest('.tok[data-ref]');
+      focus(tok ? tok.dataset.ref : null);
+    });
+    els.explain.addEventListener('mouseleave', () => focus(null));
+
     els.codeView.addEventListener('click', (e) => {
       const line = e.target.closest('.ln');
       if (line && view.trace) jumpToLine(Number(line.dataset.line));

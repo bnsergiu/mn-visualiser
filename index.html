@@ -55,20 +55,24 @@
         <label class="speed">
           <span>Speed</span>
           <select id="speed">
-            <option value="1">1 / s</option>
-            <option value="2">2 / s</option>
-            <option value="4" selected>4 / s</option>
-            <option value="10">10 / s</option>
-            <option value="30">30 / s</option>
+            <option value="0.25">1 step / 4 s</option>
+            <option value="0.5">1 step / 2 s</option>
+            <option value="1" selected>1 step / s</option>
+            <option value="2">2 steps / s</option>
+            <option value="4">4 steps / s</option>
+            <option value="10">10 steps / s</option>
+            <option value="30">30 steps / s</option>
           </select>
         </label>
       </div>
 
-      <div id="explain" class="explain"><span class="muted">The current line, with values filled in, appears here.</span></div>
+      <div id="explain" class="explain"><span class="muted">The current line, with values filled in, appears here. Hover a value to see which cell it came from.</span></div>
 
       <div class="legend">
         <span class="key"><i class="sw read"></i>read by this line</span>
-        <span class="key"><i class="sw write"></i>written / changed</span>
+        <span class="key"><i class="sw write"></i>written by this line</span>
+        <span class="key"><i class="sw done"></i>written earlier</span>
+        <span class="key"><b class="ptr-demo">i→</b>index that picked the row / column</span>
         <span class="spacer"></span>
         <label class="opt"><input id="shade" type="checkbox"> Shade by value</label>
         <label class="opt">Decimals

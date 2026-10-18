@@ -7,7 +7,9 @@ store:
   a shared ``blobs`` table, steps only hold indices into it),
 * which array / list cells the line read and which it wrote,
 * the line with the current values filled in, e.g.
-  ``c[1, 2] = 0.31 + 0.62 * 0.41  ->  0.5642``,
+  ``c[1, 2] = 0.31 + 0.62 * 0.41  ->  0.5642``. Values taken from a cell or a
+  variable are wrapped in markers (see ``_mark``) so the page can colour them
+  and link them back to that cell,
 * how much had been printed so far.
 
 Entry point: ``trace_json(code, stdin, max_steps)`` returns the trace as JSON.
@@ -20,6 +22,7 @@ import inspect
 import io
 import json
 import math
+import re
 import sys
 import types
 
@@ -68,6 +71,19 @@ class _KeyProbe:
 
 _PROBE_NAME = "__mn_probe__"
 _PROBE = _KeyProbe()
+
+# Explanation markers: U+E000 kind ref U+E001 text U+E002, where kind is
+# r (value read from a cell), n (value of a variable) or w (what gets written),
+# and ref is "uid:name:cell" ("uid:name:" for a plain variable, "" if unknown).
+_MARK_RE = re.compile("\ue000[^\ue001]*\ue001([^\ue002]*)\ue002")
+
+
+def _mark(kind, ref, text):
+    return f"\ue000{kind}{ref}\ue001{text}\ue002"
+
+
+def _plain(text):
+    return _MARK_RE.sub(r"\1", text)
 
 
 # ---------------------------------------------------------------- values
@@ -169,6 +185,44 @@ def _cells(value, index_values):
     except Exception:
         return None
     return [int(i) for i in np.atleast_1d(selection).ravel()]
+
+
+def _axis_labels(value, slices, indices):
+    """Which index expression picked which rows / columns:
+    `a[i, k]` -> [[0, "i", [row]], [1, "k", [col]]]. Constant indices get no label."""
+    shape = _grid_shape(value)
+    if shape is None:
+        return []
+    if len(slices) == 1:
+        node, index = slices[0], indices[0]
+        if isinstance(node, ast.Tuple):
+            if not isinstance(index, tuple):
+                return []
+            exprs, values = node.elts, list(index)
+        else:
+            exprs, values = [node], [index]
+    else:  # a[i][j]: only when every index but the last picks a single row
+        if any(isinstance(n, ast.Tuple) for n in slices):
+            return []
+        if not all(isinstance(v, (int, np.integer)) for v in indices[:-1]):
+            return []
+        exprs, values = slices, indices
+    if len(exprs) != len(values) or len(exprs) > len(shape):
+        return []
+    labels = []
+    for axis, (node, index) in enumerate(zip(exprs, values)):
+        if not any(isinstance(n, ast.Name) for n in ast.walk(node)):
+            continue
+        size = shape[axis]
+        if isinstance(index, (int, np.integer)) and not isinstance(index, (bool, np.bool_)):
+            positions = [int(index) % size] if -size <= index < size else []
+        elif isinstance(index, slice):
+            positions = list(range(*index.indices(size)))
+        else:
+            continue
+        if positions:
+            labels.append([axis, ast.unparse(node), positions])
+    return labels
 
 
 def _cell_list(array):
@@ -312,12 +366,13 @@ def _as_load(node):
     return node
 
 
-def _lit(value):
-    """A node that unparses as the formatted value."""
+def _lit(value, kind=None, ref=""):
+    """A node that unparses as the formatted value (marked when `kind` is given)."""
     text = _fmt_scalar(value)
+    shown = _mark(kind, ref, text) if kind else text
     if text.startswith("-"):
-        text = f"({text})"
-    return ast.Name(id=text, ctx=ast.Load())
+        shown = f"({shown})"
+    return ast.Name(id=shown, ctx=ast.Load())
 
 
 def _body_range(body):
@@ -349,18 +404,27 @@ class _Substituter(ast.NodeTransformer):
         self.tracer = tracer
         self.frame = frame
         self.local_vars = frame.f_locals
+        self.marks = True
 
     def expr(self, node):
         return self.visit(copy.deepcopy(node))
 
     def target(self, node):
-        """`c[i, j]` -> `c[1, 2]` (keeps the name being assigned)."""
-        node = copy.deepcopy(node)
-        if isinstance(node, ast.Subscript):
-            return self._indices_only(node)
+        """`c[i, j]` -> `c[1, 2]`, marked as the thing being written."""
         if isinstance(node, (ast.Tuple, ast.List)):
-            node.elts = [self.target(e) for e in node.elts]
-        return node
+            return ", ".join(self.target(e) for e in node.elts)
+        self.marks = False  # no markers nested inside the target's own marker
+        try:
+            text = _unparse(self._indices_only(copy.deepcopy(node)))
+        finally:
+            self.marks = True
+        if isinstance(node, ast.Subscript):
+            ref = self.tracer._cell_ref(node, self.frame)
+        elif isinstance(node, ast.Name):
+            ref = f"{self.tracer._store_owner(self.frame, node.id)}:{node.id}:"
+        else:
+            ref = ""
+        return _mark("w", ref, text)
 
     def _indices_only(self, node):
         if isinstance(node, ast.Subscript):
@@ -377,13 +441,19 @@ class _Substituter(ast.NodeTransformer):
             else:
                 return node
             if _is_scalar(value):
-                return _lit(value)
+                if not self.marks:
+                    return _lit(value)
+                uid, _ = self.tracer._lookup(self.frame, node.id)
+                return _lit(value, "n", f"{uid}:{node.id}:" if uid is not None else "")
         return node
 
     def visit_Subscript(self, node):
         value = self.tracer._safe_eval(_as_load(node), self.frame)
         if value is not _FAIL and _is_scalar(value):
-            return _lit(value)
+            if not self.marks:
+                return _lit(value)
+            ref = self.tracer._cell_ref(node, self.frame)  # "" for e.g. a.shape[0]
+            return _lit(value, "r" if ref else "n", ref)
         return self._indices_only(node)
 
     def visit_Call(self, node):
@@ -597,23 +667,26 @@ class Tracer:
             accesses = [a for a in accesses if a[0] == "r"]
 
         reads, writes = {}, {}
-        for mode, uid, name, cells in accesses:
+        for mode, uid, name, cells, labels in accesses:
             bucket = reads if mode == "r" else writes
-            key = (uid, name)
-            if key in bucket and (bucket[key] is None or cells is None):
-                bucket[key] = None
-            elif key in bucket:
-                bucket[key] = sorted(set(bucket[key]) | set(cells))
+            entry = bucket.get((uid, name))
+            if entry is None:
+                bucket[(uid, name)] = [cells, list(labels)]
+                continue
+            if entry[0] is None or cells is None:
+                entry[0] = None
             else:
-                bucket[key] = cells
+                entry[0] = sorted(set(entry[0]) | set(cells))
+            entry[1].extend(label for label in labels if label not in entry[1])
 
         ret_uid, ret_value = (self._uid(ret[0]), ret[1]) if ret else (None, None)
         step = {
             "line": p["line"],
             "span": p["span"],
             "frame": p["uid"],
-            "reads": [[uid, name, cells] for (uid, name), cells in reads.items()],
-            "writes": [[uid, name, cells] for (uid, name), cells in writes.items()],
+            # [uid, name, cells or None for the whole value, axis labels]
+            "reads": [[uid, name, *entry] for (uid, name), entry in reads.items()],
+            "writes": [[uid, name, *entry] for (uid, name), entry in writes.items()],
             "explain": explain,
             "out": self.stdout.tell(),
             "state": self._snapshot(event_frame, ret_uid, ret_value, p),
@@ -708,16 +781,17 @@ class Tracer:
                     if all(i is not _FAIL for i in indices):
                         cells = _cells(value, indices)
                         if cells is not None:
-                            out.append((mode, uid, name, cells))
+                            labels = _axis_labels(value, slices, indices)
+                            out.append((mode, uid, name, cells, labels))
                 for s in slices:
                     self._collect(s, "r", frame, out, inside_comprehension)
                 return
         elif isinstance(node, ast.Name):
             uid, value = self._lookup(frame, node.id)
             if mode == "w":
-                out.append(("w", self._store_owner(frame, node.id), node.id, None))
+                out.append(("w", self._store_owner(frame, node.id), node.id, None, []))
             elif uid is not None and _shown(node.id, value):
-                out.append(("r", uid, node.id, None))
+                out.append(("r", uid, node.id, None, []))
             return
         elif isinstance(node, (ast.Tuple, ast.List)) and mode == "w":
             for element in node.elts:
@@ -740,7 +814,7 @@ class Tracer:
                 if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
                     uid, value = self._lookup(frame, sub.id)
                     if uid is not None and _grid_shape(value) is not None:
-                        out.append(("r", uid, sub.id, None))
+                        out.append(("r", uid, sub.id, None, []))
             return
         for child in ast.iter_child_nodes(node):
             self._collect(child, "r", frame, out, inside_comprehension)
@@ -762,6 +836,21 @@ class Tracer:
         if name in frame.f_globals and self.module_uid is not None:
             return self.module_uid, frame.f_globals[name]
         return None, None
+
+    def _cell_ref(self, node, frame):
+        """"uid:name:cell" for a subscript that picks exactly one cell, else ""."""
+        chain = _subscript_chain(node)
+        if chain is None:
+            return ""
+        name, slices = chain
+        uid, value = self._lookup(frame, name)
+        if uid is None:
+            return ""
+        indices = [self._eval_index(s, frame) for s in slices]
+        if any(i is _FAIL for i in indices):
+            return ""
+        cells = _cells(value, indices)
+        return f"{uid}:{name}:{cells[0]}" if cells and len(cells) == 1 else ""
 
     def _store_owner(self, frame, name):
         code = frame.f_code
@@ -824,16 +913,17 @@ class Tracer:
             if getattr(stmt, "value", None) is None:
                 return None
             return {"kind": "assign", "targets": targets, "literal": _is_literal(stmt.value),
-                    "lhs": " = ".join(_unparse(sub.target(t)) for t in targets),
-                    "rhs": _unparse(sub.expr(stmt.value))}
+                    "lhs": " = ".join(sub.target(t) for t in targets),
+                    "rhs": _unparse(sub.expr(stmt.value)), "ref": _target_ref(targets[0], sub)}
         if isinstance(stmt, ast.AugAssign):
             current = sub.expr(_as_load(stmt.target))
             rhs = ast.BinOp(left=current, op=stmt.op, right=sub.expr(stmt.value))
             return {"kind": "assign", "targets": [stmt.target], "literal": False,
-                    "lhs": _unparse(sub.target(stmt.target)), "rhs": _unparse(rhs)}
+                    "lhs": sub.target(stmt.target), "rhs": _unparse(rhs),
+                    "ref": _target_ref(stmt.target, sub)}
         if isinstance(stmt, (ast.For, ast.AsyncFor)):
             return {"kind": "for", "target": stmt.target, "body": _body_range(stmt.body),
-                    "iter": _unparse(sub.expr(stmt.iter))}
+                    "iter": _unparse(sub.expr(stmt.iter)), "ref": _target_ref(stmt.target, sub)}
         if isinstance(stmt, (ast.If, ast.While)):
             return {"kind": "while" if isinstance(stmt, ast.While) else "if",
                     "body": _body_range(stmt.body), "test": ast.unparse(sub.expr(stmt.test))}
@@ -871,8 +961,8 @@ class Tracer:
             value = self._safe_eval(_as_load(e["targets"][0]), frame)
             if value is not _FAIL:
                 result = _fmt_value(value)
-                if result != e["rhs"]:
-                    text += "  →  " + result
+                if result != _plain(e["rhs"]):
+                    text += "  →  " + _mark("w", e["ref"], result)
             return text
         if kind == "for":
             target = _unparse(e["target"])
@@ -881,7 +971,7 @@ class Tracer:
             if next_line is not None and low <= next_line <= high:
                 value = self._safe_eval(_as_load(e["target"]), frame)
                 shown = _fmt_value(value) if value is not _FAIL else "?"
-                return f"{header}  →  {target} = {shown}"
+                return f"{header}  →  " + _mark("w", e["ref"], f"{target} = {shown}")
             p["loop_done"] = True
             return f"{header}  →  loop finished"
         if kind in ("if", "while"):
@@ -895,12 +985,21 @@ class Tracer:
             text = "return " + e["value"]
             if ret and not p["error"]:
                 result = _fmt_value(ret[1])
-                if result != e["value"]:
+                if result != _plain(e["value"]):
                     text += "  →  " + result
             return text
         if kind == "expr":
             return e["text"] if e["text"] != e["plain"] else ""
         return ""
+
+
+def _target_ref(node, sub):
+    """The marker ref of an assignment target (a single cell or a variable)."""
+    if isinstance(node, ast.Subscript):
+        return sub.tracer._cell_ref(node, sub.frame)
+    if isinstance(node, ast.Name):
+        return f"{sub.tracer._store_owner(sub.frame, node.id)}:{node.id}:"
+    return ""
 
 
 def _describe(exc):

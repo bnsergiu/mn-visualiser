@@ -4,10 +4,11 @@
 
 Paste any Python / NumPy exercise and replay it line by line. For every step you see:
 
+- every matrix, vector, list and loop variable, drawn as a bracketed grid
+- the cells the line **read** (blue) and **wrote** (orange); cells written on earlier steps keep a light tint, so you can watch a result fill up
+- which index picked which cell: `a[i, k]` puts an `i →` pointer beside its row and a `k ↓` pointer above its column
 - the line being executed, with the current values filled in
-  (`c[1, 2] = 0.31 + 0.62 * 0.41  →  0.56`)
-- every matrix, vector, list and loop variable, drawn as a grid
-- the cells the line **read** (blue) and **wrote or changed** (orange), with the row and column labels lit up
+  (`c[1, 2] = 0.31 + 0.62 * 0.41  →  0.56`); each value is coloured like the cell it came from, and hovering it outlines that cell
 - how many times each line has run so far, and what was printed
 
 Python runs in the browser through [Pyodide](https://pyodide.org) (CPython 3.13 + NumPy compiled to WebAssembly), so there is nothing to install.
@@ -28,7 +29,7 @@ Then open <http://localhost:8000>. The first load downloads Python and NumPy fro
 1. Paste the exercise code (or pick one from **Load an example…**).
 2. If the code calls `input()`, put the answers in the box under the editor, one per line. If the box runs out, the browser asks.
 3. Press **Visualise** (Ctrl/⌘ + Enter).
-4. Step with the buttons, the slider, or the keyboard: ← → to step, Space to play/pause, Home / End. Clicking a line in the code jumps to the next time that line runs.
+4. Step with the buttons, the slider, or the keyboard: ← → to step, Space to play/pause, Home / End. Clicking a line in the code jumps to the next time that line runs. **Speed** goes from one step every 4 seconds up to 30 steps a second.
 
 Notebook-only lines such as `!pip install ...` or `%timeit` are skipped.
 
