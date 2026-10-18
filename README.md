@@ -1,5 +1,7 @@
 # Matrix Visualiser
 
+**Open it: <https://bnsergiu.github.io/mn-visualiser/>**
+
 Paste any Python / NumPy exercise and replay it line by line. For every step you see:
 
 - the line being executed, with the current values filled in
@@ -10,9 +12,9 @@ Paste any Python / NumPy exercise and replay it line by line. For every step you
 
 Python runs in the browser through [Pyodide](https://pyodide.org) (CPython 3.13 + NumPy compiled to WebAssembly), so there is nothing to install.
 
-## Running it
+## Running it locally
 
-The page loads `tracer.py` next to it, which browsers refuse to do from `file://`, so serve the folder:
+The hosted link above needs no setup. To run your own copy (e.g. while changing the code), note that the page loads `tracer.py` next to it, which browsers refuse to do from `file://`, so serve the folder:
 
 ```sh
 cd mn-visualiser
